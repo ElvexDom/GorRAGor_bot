@@ -23,11 +23,15 @@ class Movie:
     
     # --- Enrichissement 3 : IMDB ---
     imdb_id: Optional[str] = None
+    imdb_rating: Optional[float] = None
+    imdb_actors: Optional[str] = None
+    imdb_director: Optional[str] = None
     casting: List[str] = field(default_factory=list)
     trivia: List[str] = field(default_factory=list)
     
     # --- Enrichissement 4 : Spark Data (Analyses textuelles) ---
     spark_text_analysis: Optional[dict] = None # Ou un objet plus spécifique
+    spark_extracted_keywords: Optional[str] = None
     
     def __post_init__(self):
         """Initialisation et normalisation automatique."""
