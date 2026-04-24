@@ -1,69 +1,79 @@
-from dataclasses import dataclass, field
-from typing import List, Optional
+from sqlalchemy import Column, Integer, String, Float, JSON, Date, Text
+from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime
+import re
 
-@dataclass
-class Movie:
-    # --- Source Maîtresse : TMDB ---
-    tmdb_id: int
-    title: str
-    overview: Optional[str] = None
-    release_date: Optional[str] = None
-    vote_average: Optional[float] = None
-    popularity: Optional[float] = None
-    poster_path: Optional[str] = None
-    
-    # --- Enrichissement 1 : Rotten Tomatoes ---
-    rt_tomatometer_score: Optional[int] = None
-    rt_audience_score: Optional[int] = None
-    rt_critics_consensus: Optional[str] = None
-    
-    # --- Enrichissement 2 : Kaggle (Détails littéraires) ---
-    kaggle_literary_details: Optional[str] = None
-    kaggle_synopsis: Optional[str] = None
-    
-    # --- Enrichissement 3 : IMDB ---
-    imdb_id: Optional[str] = None
-    imdb_rating: Optional[float] = None
-    imdb_actors: Optional[str] = None
-    imdb_director: Optional[str] = None
-    casting: List[str] = field(default_factory=list)
-    trivia: List[str] = field(default_factory=list)
-    
-    # --- Enrichissement 4 : Spark Data (Analyses textuelles) ---
-    spark_text_analysis: Optional[dict] = None # Ou un objet plus spécifique
-    spark_extracted_keywords: Optional[str] = None
-    
-    def __post_init__(self):
-        """Initialisation et normalisation automatique."""
-        self.normalize_date()
-        self.clean_texts()
+Base = declarative_base()
 
-    def normalize_date(self):
-        """Normalise la date au format ISO 8601 (YYYY-MM-DD)."""
-        date_str = self.release_date
-        if date_str and len(date_str) == 4 and date_str.isdigit():
-            self.release_date = f"{date_str}-01-01"
-            
+class Movie(Base):
+    __tablename__ = 'movies'
+
+    # --- SOURCE MAÎTRESSE : TMDB (Identifiants & Référence) ---
+    tmdb_id = Column(Integer, primary_key=True)
+    imdb_id = Column(String(20), index=True, nullable=True) # Niveau de matching 2
+    title = Column(String(255), nullable=False)
+    original_title = Column(String(255))
+    overview = Column(Text)
+    release_date = Column(Date) # Normalisé ISO 8601
+    vote_average = Column(Float)
+    vote_count = Column(Integer)
+    popularity = Column(Float)
+    poster_path = Column(String(255))
+    backdrop_path = Column(String(255))
+
+    # --- ENRICHISSEMENT 1 : ROTTEN TOMATOES (Scraping) ---
+    rt_tomatometer_score = Column(Integer) # Conservé en base 100 selon consignes
+    rt_audience_score = Column(Integer)
+    rt_critics_consensus = Column(Text)
+
+    # --- ENRICHISSEMENT 2 : KAGGLE (Polars / Littérature) ---
+    budget = Column(Float)
+    revenue = Column(Float)
+    kaggle_synopsis = Column(Text)
+
+    # --- ENRICHISSEMENT 3 : IMDB (SQLite / Seuil Qualité) ---
+    imdb_rating = Column(Float)
+    num_votes = Column(Integer) # Pour filtrage >= 1000
+    director = Column(String(255))
+    actors = Column(Text) # Liste d'acteurs concaténée
+
+    # --- ENRICHISSEMENT 4 : SPARK DATA (Analyses NLP) ---
+    spark_analysis = Column(JSON)
+    spark_extracted_keywords = Column(Text)
+
+    def normalize_date(self, date_str):
+        """Normalise les dates hétérogènes au format ISO 8601 (YYYY-MM-DD)."""
+        if not date_str:
+            return None
+        try:
+            # Gestion YYYY seul (Kaggle/IMDB) -> YYYY-01-01
+            if len(str(date_str)) == 4:
+                return datetime.strptime(f"{date_str}-01-01", "%Y-%m-%d").date()
+            # Gestion YYYY-MM-DD (TMDB)
+            return datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return None
+
     def clean_texts(self):
-        """Nettoyage basique des textes (espaces, UTF-8)."""
-        if isinstance(self.title, str):
-            self.title = self.title.strip()
-        if isinstance(self.overview, str):
-            self.overview = self.overview.strip()
+        """Nettoyage : suppression HTML, espaces superflus et conversion UTF-8."""
+        for attr in ['title', 'overview', 'rt_critics_consensus', 'kaggle_synopsis']:
+            val = getattr(self, attr)
+            if val and isinstance(val, str):
+                # Suppression des balises HTML
+                clean_val = re.sub(r'<[^>]+>', '', val)
+                # Trim et normalisation des espaces
+                setattr(self, attr, " ".join(clean_val.split()))
 
     def get_summary(self) -> str:
-        """Retourne un résumé textuel pour le futur RAG."""
-        summary = f"Titre: {self.title}\n"
-        summary += f"Date de sortie: {self.release_date}\n"
-        summary += f"Résumé: {self.overview}\n"
+        """Bloc de texte optimisé pour le futur RAG (Fallback logic)."""
+        # Priorité TMDB > Kaggle pour la description
+        desc = self.overview if self.overview else (self.kaggle_synopsis if self.kaggle_synopsis else "N/A")
         
-        if self.rt_tomatometer_score:
-            summary += f"Score Rotten Tomatoes: {self.rt_tomatometer_score}%\n"
-        
-        if self.vote_average:
-            summary += f"Note moyenne (TMDB): {self.vote_average}/10\n"
-            
-        return summary
-
-    def __str__(self):
-        return f"Movie(title='{self.title}', tmdb_id={self.tmdb_id}, imdb_id='{self.imdb_id}')"
+        return (
+            f"Titre: {self.title}\n"
+            f"Sortie: {self.release_date}\n"
+            f"Réalisateur: {self.director}\n"
+            f"Description: {desc}\n"
+            f"Note TMDB: {self.vote_average}/10 | Note IMDB: {self.imdb_rating}/10\n"
+            f"Consensus: {self.rt_critics_consensus}"
+        )

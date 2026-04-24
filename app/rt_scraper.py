@@ -32,10 +32,14 @@ class RTScraper:
 
     def search_and_enrich(self, movie: Movie) -> Movie:
         """Cherche le film sur RT et enrichit l'objet Movie avec les scores."""
-        query = f"{movie.title} {movie.release_date[:4] if movie.release_date else ''}"
+        
+        # --- MODIFICATION : UTILISATION EXCLUSIVE DE DATETIME.DATE ---
+        year_str = str(movie.release_date.year) if movie.release_date else ""
+        
+        query = f"{movie.title} {year_str}".strip()
         search_url = f"https://www.rottentomatoes.com/search?search={urllib.parse.quote(query)}"
         
-        print(f"🔍 Recherche RT pour : {movie.title}...")
+        print(f"🔍 Recherche RT pour : {query}...")
         
         try:
             self.driver.get(search_url)
@@ -151,13 +155,15 @@ class RTScraper:
 
 if __name__ == "__main__":
     # --- TEST : MODE VISIBLE ---
-    # Je désactive le mode headless pour que vous puissiez voir si un truc bloque !
     scraper = RTScraper(headless=False) 
+    
+    # Pour le test local, on importe datetime
+    from datetime import datetime
     
     test_movie = Movie(
         tmdb_id=0,
         title="The Exorcist",
-        release_date="1973-12-26"
+        release_date=datetime.strptime("1973-12-26", "%Y-%m-%d").date()
     )
     
     enriched_movie = scraper.search_and_enrich(test_movie)
