@@ -4,7 +4,7 @@ import logging
 from typing import List
 
 from app.models import TMDBMovie, KaggleData
-from app.utils.normalizers import clean_txt
+from app.utils.normalizers import clean_txt, normalize_date
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,14 @@ class KaggleIngestor:
         id_col = "id" if "id" in df.columns else df.columns[1]
         cols_to_keep = [id_col, "overview", "budget", "revenue", "runtime", "tagline", "genre_names"]
         available_cols = [c for c in cols_to_keep if c in df.columns]
+
+        if "release_date" in df.columns:
+            df = df.with_columns(
+                pl.col("release_date").map_elements(
+                    lambda x: str(normalize_date(x)) if x and normalize_date(x) else None,
+                    return_dtype=pl.String
+                )
+            )
 
         dedup_cols = [c for c in ["title", "release_date"] if c in df.columns]
         df_dedup = df.unique(subset=dedup_cols) if dedup_cols else df

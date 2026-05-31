@@ -2,7 +2,8 @@ import logging
 import os
 from typing import List
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lower, regexp_replace, split, array_distinct, slice, concat_ws, expr
+from pyspark.sql.functions import col, lower, regexp_replace, split, concat_ws, explode, length, collect_list, row_number
+from pyspark.sql.window import Window
 
 from app.models import TMDBMovie, KaggleData, SparkAnalysis
 
@@ -49,50 +50,36 @@ class SparkProcessor:
         logger.info("Spark : %d films analyses.", len(results))
         return results
 
-    def _process_from_parts(self) -> dict:
-        """
-        Lit les fichiers CSV partitionnés avec Spark et extrait les mots-clés.
-        C'est l'usage natif de Spark : traitement distribué de fichiers splittés.
-        """
-        logger.info("Spark : lecture de %s/*.csv ...", PARTS_DIR)
-
-        df = self.spark.read \
-            .option("header", "true") \
-            .option("inferSchema", "true") \
-            .csv(f"{PARTS_DIR}/*.csv")
-
-        id_col = "id" if "id" in df.columns else df.columns[0]
-
-        processed_df = (
-            df.withColumn("words",
-                split(lower(regexp_replace(col("overview"), "[^a-zA-Z\\s]", "")), "\\s+"))
-            .withColumn("filtered",
-                expr("filter(words, x -> length(x) > 3)"))
-            .withColumn("keywords",
-                concat_ws(", ", slice(array_distinct(col("filtered")), 1, 5)))
-            .select(col(id_col).cast("integer").alias("tmdb_id"), "keywords")
-            .filter(col("keywords") != "")
+    def _top5_keywords(self, df, id_col: str) -> dict:
+        """Extrait les 5 mots les plus fréquents par film (fréquence réelle)."""
+        window = Window.partitionBy("tmdb_id").orderBy(col("cnt").desc())
+        result = (
+            df.select(col(id_col).cast("integer").alias("tmdb_id"),
+                      regexp_replace(lower(col("overview")), "[^a-zA-Z\\s]", "").alias("text"))
+            .filter(col("text").isNotNull() & (col("text") != ""))
+            .withColumn("word", explode(split(col("text"), "\\s+")))
+            .filter(length(col("word")) > 3)
+            .groupBy("tmdb_id", "word").count().withColumnRenamed("count", "cnt")
+            .withColumn("rn", row_number().over(window))
+            .filter(col("rn") <= 5)
+            .groupBy("tmdb_id").agg(concat_ws(", ", collect_list("word")).alias("keywords"))
         )
+        return {row["tmdb_id"]: row["keywords"] for row in result.collect()}
 
-        return {row["tmdb_id"]: row["keywords"] for row in processed_df.collect()}
+    def _process_from_parts(self) -> dict:
+        """Lit les fichiers CSV partitionnés avec Spark et extrait les mots-clés par fréquence."""
+        logger.info("Spark : lecture de %s/*.csv ...", PARTS_DIR)
+        df = self.spark.read.option("header", "true").option("inferSchema", "true").csv(f"{PARTS_DIR}/*.csv")
+        id_col = "id" if "id" in df.columns else df.columns[0]
+        return self._top5_keywords(df, id_col)
 
     def _process_from_memory(self, movies: List[TMDBMovie], kaggle_data: List[KaggleData]) -> dict:
-        """Fallback : traitement depuis les objets en mémoire."""
+        """Fallback : traitement depuis les objets en mémoire, mots-clés par fréquence."""
         kaggle_map = {k.tmdb_id: k.synopsis for k in kaggle_data if k.synopsis}
         data = [(m.tmdb_id, kaggle_map.get(m.tmdb_id) or m.overview or "") for m in movies]
 
-        df = self.spark.createDataFrame(data, ["tmdb_id", "text"])
-        processed_df = (
-            df.withColumn("words",
-                split(lower(regexp_replace(col("text"), "[^a-zA-Z\\s]", "")), "\\s+"))
-            .withColumn("filtered",
-                expr("filter(words, x -> length(x) > 3)"))
-            .withColumn("keywords",
-                concat_ws(", ", slice(array_distinct(col("filtered")), 1, 5)))
-            .select("tmdb_id", "keywords")
-            .filter(col("keywords") != "")
-        )
-        return {row["tmdb_id"]: row["keywords"] for row in processed_df.collect()}
+        df = self.spark.createDataFrame(data, ["tmdb_id", "overview"])
+        return self._top5_keywords(df, "tmdb_id")
 
     def close(self):
         if self.spark:
