@@ -11,4 +11,8 @@ dependencies = [
     "webdriver-manager>=4.0.1",
     "sqlalchemy>=2.0.25",
     "psycopg2-binary>=2.9.9",
+    "pyspark>=4.1.1",
+    "polars>=1.0.0",
+    "rapidfuzz>=3.0.0",
+    "kaggle>=2.2.0",
 ]

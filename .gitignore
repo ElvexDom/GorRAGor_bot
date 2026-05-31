@@ -6,8 +6,8 @@ dist/
 wheels/
 *.egg-info
 
-# Database files
-*.db
+# Données (générées automatiquement par le pipeline)
+data/
 
 # Virtual environments
 .venv

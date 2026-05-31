@@ -1,79 +1,137 @@
 import polars as pl
 import os
+import logging
 from typing import List
 
-try:
-    from app.models import Movie
-except ImportError:
-    from models import Movie
+from app.models import TMDBMovie, KaggleData
+from app.utils.normalizers import clean_txt
+
+logger = logging.getLogger(__name__)
+
+KAGGLE_DATASET  = "evangower/horror-movies"
+KAGGLE_FILENAME = "horror_movies.csv"
+PARTS_DIR       = "data/tmp/kaggle_parts"
+PART_SIZE       = 10_000
+
 
 class KaggleIngestor:
-    def __init__(self, csv_path: str = "data/raw/horror_movies.csv"):
+    def __init__(self, csv_path: str = "data/tmp/kaggle.csv"):
         self.csv_path = csv_path
-        self.df = None
-        
+
+    def _download(self):
+        """Télécharge le dataset Kaggle si absent."""
+        try:
+            import kaggle
+            import glob
+            kaggle.api.authenticate()
+            dest_dir = os.path.dirname(self.csv_path)
+            os.makedirs(dest_dir, exist_ok=True)
+            kaggle.api.dataset_download_files(
+                KAGGLE_DATASET, path=dest_dir, unzip=True, quiet=False,
+            )
+            # Renomme le fichier extrait sous son nom d'origine
+            for f in glob.glob(os.path.join(dest_dir, "*.csv")):
+                if f != self.csv_path:
+                    os.rename(f, self.csv_path)
+                    logger.info("Fichier renomme : %s -> %s", f, self.csv_path)
+                    break
+            logger.info("Dataset Kaggle telecharge : %s", self.csv_path)
+        except Exception as e:
+            logger.error("Impossible de telecharger le dataset Kaggle : %s", e)
+
+    def _load(self) -> pl.DataFrame | None:
+        """Charge le CSV en DataFrame Polars. Télécharge si absent."""
         if not os.path.exists(self.csv_path):
-            print(f"⚠️ Fichier Kaggle non trouvé : {self.csv_path}")
-            return
+            logger.info("Fichier Kaggle absent — telechargement en cours...")
+            self._download()
+
+        if not os.path.exists(self.csv_path):
+            logger.error("Fichier Kaggle introuvable : %s", self.csv_path)
+            return None
 
         try:
-            # On lit tout le CSV
-            self.df = pl.read_csv(self.csv_path, infer_schema_length=10000)
-            
-            # Mapping : Colonne 0 = index (""), Colonne 1 = "id" (TMDB ID)
-            self.id_col = self.df.columns[1]
-            
-            # Conversion date pour compatibilité Scraper
-            if "release_date" in self.df.columns:
-                self.df = self.df.with_columns(
-                    pl.col("release_date").str.to_date(format="%Y-%m-%d", strict=False)
-                )
-            
-            print(f"✅ KaggleIngestor prêt. (Mapping colonne: '{self.id_col}')")
+            df = pl.read_csv(self.csv_path, infer_schema_length=10000)
+            logger.info("CSV Kaggle charge : %d lignes.", len(df))
+            return df
         except Exception as e:
-            print(f"❌ Erreur lecture CSV : {e}")
+            logger.error("Erreur lecture CSV : %s", e)
+            return None
 
-    def enrich_movies(self, movies: List[Movie]) -> List[Movie]:
-        """Fusionne les données Kaggle avec les objets Movie fournis."""
-        if self.df is None or not movies:
-            return movies
+    def split_for_spark(self) -> str:
+        """
+        Partitionne le CSV en fichiers de ~10 000 lignes pour PySpark.
+        Retourne le chemin du dossier contenant les partitions.
+        """
+        df = self._load()
+        if df is None:
+            return PARTS_DIR
 
-        # Dictionnaire d'indexation pour accès O(1)
+        os.makedirs(PARTS_DIR, exist_ok=True)
+
+        # Colonnes utiles pour Spark
+        cols = [c for c in ["id", "overview", "title", "release_date"] if c in df.columns]
+        df_spark = df.select(cols)
+
+        total = len(df_spark)
+        n_parts = (total // PART_SIZE) + (1 if total % PART_SIZE else 0)
+
+        for i in range(n_parts):
+            part = df_spark.slice(i * PART_SIZE, PART_SIZE)
+            part_path = os.path.join(PARTS_DIR, f"part_{i+1:03d}.csv")
+            part.write_csv(part_path)
+
+        logger.info("Kaggle splitte en %d fichiers dans %s.", n_parts, PARTS_DIR)
+        return PARTS_DIR
+
+    def build_kaggle_data(self, movies: List[TMDBMovie]) -> List[KaggleData]:
+        """
+        Construit les objets KaggleData à partir du CSV.
+        Dédoublonne sur title + release_date avant fusion.
+        """
+        if not movies:
+            return []
+
+        df = self._load()
+        if df is None:
+            return []
+
+        id_col = "id" if "id" in df.columns else df.columns[1]
+        cols_to_keep = [id_col, "overview", "budget", "revenue", "runtime", "tagline", "genre_names"]
+        available_cols = [c for c in cols_to_keep if c in df.columns]
+
+        dedup_cols = [c for c in ["title", "release_date"] if c in df.columns]
+        df_dedup = df.unique(subset=dedup_cols) if dedup_cols else df
+
         kaggle_dict = {}
-        for row in self.df.to_dicts():
+        for row in df_dedup.select(available_cols).to_dicts():
             try:
-                # Nettoyage et conversion de l'ID du CSV
-                raw_id = row.get(self.id_col)
-                if raw_id:
-                    clean_id = int(float(str(raw_id).strip().replace('"', '')))
-                    kaggle_dict[clean_id] = row
-            except:
+                raw_id = row.get(id_col)
+                if raw_id is not None:
+                    kaggle_dict[int(float(str(raw_id)))] = row
+            except Exception:
                 continue
 
-        count = 0
+        results = []
         for movie in movies:
-            try:
-                search_id = int(float(str(movie.tmdb_id).strip()))
-            except:
-                search_id = None
+            data = kaggle_dict.get(movie.tmdb_id)
+            if not data:
+                continue
 
-            data = kaggle_dict.get(search_id)
-            
-            if data:
-                # Enrichissement du synopsis et des métadonnées littéraires
-                movie.kaggle_synopsis = data.get("overview")
-                
-                g = data.get("genre_names", "")
-                t = data.get("tagline", "")
-                r = data.get("runtime", "")
-                
-                details = []
-                if g: details.append(f"Genres: {g}")
-                if t: details.append(f"Tagline: {t}")
-                if r: details.append(f"Durée: {r} min")
-                
-                movie.kaggle_literary_details = " | ".join(details)
-                count += 1
+            g = data.get("genre_names", "") or ""
+            t = data.get("tagline", "") or ""
+            r = data.get("runtime", "") or ""
+            details_parts = []
+            if g: details_parts.append(f"Genres: {g}")
+            if t: details_parts.append(f"Tagline: {t}")
+            if r: details_parts.append(f"Duree: {r} min")
 
-        print(f"📊 Enrichissement Kaggle : {count}/{len(movies)} films complétés.")
-        return movies
+            results.append(KaggleData(
+                tmdb_id          = movie.tmdb_id,
+                synopsis         = clean_txt(data.get("overview")),
+                literary_details = clean_txt(" | ".join(details_parts)) if details_parts else None,
+                budget           = data.get("budget"),
+                revenue          = data.get("revenue"),
+            ))
+
+        logger.info("Kaggle : %d/%d films enrichis.", len(results), len(movies))
+        return results
