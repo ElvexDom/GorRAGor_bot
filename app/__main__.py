@@ -8,7 +8,7 @@ sys.stderr.reconfigure(encoding='utf-8')
 from dotenv import load_dotenv
 from app.fusion_engine import DataOrchestrator
 from app.database import SessionLocal, engine
-from app.models import Base, TMDBMovie, KaggleData
+from app.models import Base, TMDBMovie, KaggleData, RTScore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,9 +96,18 @@ def main():
         if args.rt or args.all:
             if not tmdb_movies:
                 tmdb_movies = load_tmdb_movies(db)
-            logger.info("ENRICH 1 : Scraping Rotten Tomatoes...")
-            rt_scores = orchestrator.enrich_with_rt(tmdb_movies)
-            sync_db(db, rt_scores)
+            already_done = {row[0] for row in db.query(RTScore.tmdb_id).all()}
+            to_scrape = [m for m in tmdb_movies if m.tmdb_id not in already_done]
+            logger.info("ENRICH 1 : Scraping Rotten Tomatoes (%d a traiter, %d deja en base)...",
+                        len(to_scrape), len(already_done))
+            batch = []
+            for score in orchestrator.rt.scrape_lazy(to_scrape):
+                batch.append(score)
+                if len(batch) >= 1000:
+                    sync_db(db, batch)
+                    batch = []
+            if batch:
+                sync_db(db, batch)
 
         if args.kaggle or args.all:
             if not tmdb_movies:

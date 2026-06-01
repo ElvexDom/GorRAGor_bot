@@ -94,15 +94,18 @@ class RTScraper:
 
     def scrape_all(self, movies: List[TMDBMovie]) -> List[RTScore]:
         """Scrape RT pour une liste de films. Retourne uniquement les scores trouvés."""
-        results = []
+        return list(self.scrape_lazy(movies))
+
+    def scrape_lazy(self, movies: List[TMDBMovie]):
+        """Générateur : yield chaque RTScore au fur et à mesure pour sauvegarde incrémentale."""
+        total = len(movies)
         for i, movie in enumerate(movies):
             if i % 10 == 0:
-                logger.info("RT : %d/%d films traites...", i, len(movies))
+                logger.info("RT : %d/%d films traites...", i, total)
             score = self.scrape_movie(movie)
             if score:
-                results.append(score)
+                yield score
             time.sleep(0.5)
-        return results
 
     def close(self):
         self.driver.quit()
