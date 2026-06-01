@@ -1,3 +1,4 @@
+import glob as pyglob
 import logging
 import os
 from typing import List
@@ -18,6 +19,7 @@ class SparkProcessor:
             .appName(app_name) \
             .master("local[*]") \
             .config("spark.driver.memory", "4g") \
+            .config("spark.sql.ansi.enabled", "false") \
             .getOrCreate()
         self.spark.sparkContext.setLogLevel("ERROR")
         logger.info("SparkProcessor : moteur analytique pret.")
@@ -56,6 +58,7 @@ class SparkProcessor:
         result = (
             df.select(col(id_col).cast("integer").alias("tmdb_id"),
                       regexp_replace(lower(col("overview")), "[^a-zA-Z\\s]", "").alias("text"))
+            .filter(col("tmdb_id").isNotNull())
             .filter(col("text").isNotNull() & (col("text") != ""))
             .withColumn("word", explode(split(col("text"), "\\s+")))
             .filter(length(col("word")) > 3)
@@ -69,7 +72,8 @@ class SparkProcessor:
     def _process_from_parts(self) -> dict:
         """Lit les fichiers CSV partitionnés avec Spark et extrait les mots-clés par fréquence."""
         logger.info("Spark : lecture de %s/*.csv ...", PARTS_DIR)
-        df = self.spark.read.option("header", "true").option("inferSchema", "true").csv(f"{PARTS_DIR}/*.csv")
+        csv_files = pyglob.glob(f"{PARTS_DIR}/*.csv")
+        df = self.spark.read.option("header", "true").option("inferSchema", "true").csv(csv_files)
         id_col = "id" if "id" in df.columns else df.columns[0]
         return self._top5_keywords(df, id_col)
 

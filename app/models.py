@@ -73,7 +73,7 @@ class IMDBData(Base):
     __tablename__ = "imdb_data"
 
     tmdb_id     = Column(Integer, ForeignKey("tmdb_movies.tmdb_id"), primary_key=True)
-    imdb_id     = Column(String(20), unique=True, index=True, nullable=True)
+    imdb_id     = Column(String(20), index=True, nullable=True)
     imdb_rating = Column(Float, nullable=True)
     num_votes   = Column(Integer, nullable=True)
     director    = Column(String(255), nullable=True)
